@@ -12,9 +12,24 @@ def load_and_process_documents(docs_path="documents/"):
         return []
     
     try:
+        # Debug: Check what files are found
+        import glob as glob_module
+        pdf_files = glob_module.glob(os.path.join(docs_path, "**/*.pdf"), recursive=True)
+        print(f"DEBUG: Found PDF files: {pdf_files}")
+        
+        if not pdf_files:
+            st.warning(f"No PDF files found in {docs_path} or its subdirectories.")
+            return []
+        
         # Load documents
         loader = DirectoryLoader(docs_path, glob="**/*.pdf", loader_cls=PyMuPDFLoader)
         documents = loader.load()
+        
+        st.info(f"Loaded {len(documents)} documents from {len(pdf_files)} PDF files.")
+        
+        if not documents:
+            st.warning("No documents were successfully loaded.")
+            return []
         
         # Split documents
         text_splitter = RecursiveCharacterTextSplitter(
@@ -23,9 +38,13 @@ def load_and_process_documents(docs_path="documents/"):
         )
         rag_documents = text_splitter.split_documents(documents)
         
+        st.success(f"Created {len(rag_documents)} document chunks for RAG.")
+        
         return rag_documents
     except Exception as e:
         st.error(f"Error loading documents: {e}")
+        import traceback
+        st.error(f"Full error: {traceback.format_exc()}")
         return []
 
 def process_uploaded_documents(uploaded_files, upload_path="uploads/temp/"):
