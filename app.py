@@ -60,7 +60,16 @@ if not generator_llm or not embeddings:
 # Load documents and create vectorstore
 with st.spinner("Loading documents and creating vectorstore..."):
     rag_documents = load_and_process_documents(docs_path)
-    vectorstore = create_vectorstore(rag_documents, embeddings, config)
+    st.write(f"DEBUG: Got {len(rag_documents) if rag_documents else 0} documents")
+    st.write(f"DEBUG: Embeddings object: {embeddings}")
+    st.write(f"DEBUG: Config: {config}")
+    
+    if rag_documents and embeddings:
+        vectorstore = create_vectorstore(rag_documents, embeddings, config)
+        st.write(f"DEBUG: Vectorstore result: {vectorstore}")
+    else:
+        st.error("Missing documents or embeddings for vectorstore creation")
+        vectorstore = None
 
 if not vectorstore:
     st.warning("⚠️ Vectorstore not available. Document-based queries will not work.")
