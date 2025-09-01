@@ -13,7 +13,7 @@ def create_rag_chain(vectorstore, llm):
         return None
     
     technical_rag_prompt = ChatPromptTemplate.from_template(TECHNICAL_RAG_PROMPT)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
     
     rag_chain = (
         RunnableParallel({
@@ -33,15 +33,29 @@ def create_vision_rag_chain(vectorstore, llm):
         return None
     
     vision_rag_prompt = ChatPromptTemplate.from_template(VISION_RAG_PROMPT)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    
+    def format_context(docs):
+        return "\n\n".join([doc.page_content for doc in docs])
+    
+    def create_retrieval_chain(input_dict):
+        # Extract the question for retrieval
+        question = input_dict.get("question", "")
+        image_class = input_dict.get("image_class", "")
+        
+        # Create retrieval query combining question and classification
+        retrieval_query = f"{question} {image_class}"
+        docs = retriever.get_relevant_documents(retrieval_query)
+        
+        return {
+            "context": format_context(docs),
+            "image_class": image_class,
+            "confidence": input_dict.get("confidence", 0.0),
+            "question": question
+        }
     
     vision_rag_chain = (
-        RunnableParallel({
-            "context": retriever | (lambda docs: "\n\n".join([doc.page_content for doc in docs])),
-            "image_class": itemgetter("image_class"),
-            "confidence": itemgetter("confidence"),
-            "question": itemgetter("question")
-        })
+        create_retrieval_chain
         | vision_rag_prompt
         | ChatOpenAI(model="gpt-4o-mini", temperature=0)
         | StrOutputParser()
