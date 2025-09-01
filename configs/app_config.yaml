@@ -13,3 +13,7 @@ rag:
   collection_name: "MOSFET_Die_Crack_Analysis"
   retrieval_k: 10
   confidence_threshold: 0.2
+  
+logging:
+  level: "INFO"
+  file: "logs/app.log"

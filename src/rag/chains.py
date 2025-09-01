@@ -13,7 +13,7 @@ def create_rag_chain(vectorstore, llm):
         return None
     
     technical_rag_prompt = ChatPromptTemplate.from_template(TECHNICAL_RAG_PROMPT)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
     
     rag_chain = (
         RunnableParallel({
@@ -33,7 +33,7 @@ def create_vision_rag_chain(vectorstore, llm):
         return None
     
     vision_rag_prompt = ChatPromptTemplate.from_template(VISION_RAG_PROMPT)
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 10})
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
     
     vision_rag_chain = (
         RunnableParallel({

@@ -8,7 +8,7 @@ def load_config(config_path="configs/app_config.yaml"):
         'model': {
             'path': "models/die_crack_classifier.onnx",
             'image_size': 224,
-            'classes': ["cracked die at upper left part", "cracked die at lower left part", "cracked die at lower right part", "cracked die at upper right part", "shattered die"]
+            'classes': ["No Crack", "Minor Crack", "Major Crack", "Severe Crack"]
         },
         'documents': {
             'static_path': "documents/",
@@ -18,8 +18,8 @@ def load_config(config_path="configs/app_config.yaml"):
         },
         'rag': {
             'collection_name': "MOSFET_Die_Crack_Analysis",
-            'retrieval_k': 10,
-            'confidence_threshold': 0.2
+            'retrieval_k': 5,
+            'confidence_threshold': 0.7
         }
     }
     

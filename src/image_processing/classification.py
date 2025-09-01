@@ -2,6 +2,7 @@ import streamlit as st
 import onnxruntime as ort
 import numpy as np
 from PIL import Image
+from .preprocessing import preprocess_image, softmax
 
 @st.cache_resource
 def load_onnx_model(model_path):
@@ -10,7 +11,7 @@ def load_onnx_model(model_path):
         return ort.InferenceSession(model_path)
     except Exception as e:
         st.error(f"Error loading ONNX model: {e}")
-        return None
+        return None, None
 
 def predict_image_class(session, image, class_names, img_size=224):
     """Predict image class using ONNX model"""

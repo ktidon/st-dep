@@ -10,8 +10,6 @@ from src.rag.document_loader import load_and_process_documents
 from src.rag.vector_store import create_vectorstore
 from src.rag.chains import create_rag_chain, create_vision_rag_chain
 from src.rag.embeddings import initialize_llm_and_embeddings
-#from src.prompts import TECHNICAL_RAG_PROMPT, VISION_RAG_PROMPT
-from src.utils import load_config, check_api_key
 
 # Page configuration
 st.set_page_config(
@@ -81,7 +79,7 @@ with col1:
     if uploaded_file is not None:
         # Display uploaded image
         image = Image.open(uploaded_file)
-        st.image(image, caption="Uploaded Die Image", use_column_width=True)
+        st.image(image, caption="Uploaded Die Image", use_container_width=True)
         
         # Classification button
         if st.button("🚀 Classify Die Crack", type="primary"):
