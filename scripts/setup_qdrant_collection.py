@@ -4,10 +4,11 @@ One-time script to create and populate Qdrant collection with your documents.
 Usage:
     python scripts/setup_qdrant_collection.py
 
-Make sure to set environment variables:
+Make sure to set environment variables or secrets:
     OPENAI_API_KEY=your-key
-    QDRANT_URL=your-url
-    QDRANT_API_KEY=your-key (if using cloud)
+    QDRANT_URL=https://a56715f1-e0ff-43cc-819a-66f55e1c3a52.us-east-1.aws.cloud.qdrant.io:443
+    QDRANT_API_KEY=your-key
+    QDRANT_COLLECTION=FMEA_Handbook
 """
 
 import os
@@ -30,7 +31,7 @@ load_dotenv()
 
 def setup_qdrant_collection(
     documents_path: str = "documents/",
-    collection_name: str = "mosfet_docs",
+    collection_name: str = None,
     qdrant_url: str = None,
     qdrant_api_key: str = None,
     chunk_size: int = 1000,
@@ -41,20 +42,24 @@ def setup_qdrant_collection(
     
     Args:
         documents_path: Path to your PDF documents
-        collection_name: Name for the Qdrant collection
+        collection_name: Name for the Qdrant collection (default: FMEA_Handbook)
         qdrant_url: Qdrant server URL (default: from env)
         qdrant_api_key: Qdrant API key (default: from env)
         chunk_size: Size of document chunks
         chunk_overlap: Overlap between chunks
     """
     
-    # Get configuration
-    qdrant_url = qdrant_url or os.getenv("QDRANT_URL", "http://localhost:6333")
+    # Get configuration with your specific Qdrant setup
+    qdrant_url = qdrant_url or os.getenv("QDRANT_URL", "https://a56715f1-e0ff-43cc-819a-66f55e1c3a52.us-east-1.aws.cloud.qdrant.io:443")
     qdrant_api_key = qdrant_api_key or os.getenv("QDRANT_API_KEY")
+    collection_name = collection_name or os.getenv("QDRANT_COLLECTION", "FMEA_Handbook")
     openai_api_key = os.getenv("OPENAI_API_KEY")
     
     if not openai_api_key:
         raise ValueError("OPENAI_API_KEY environment variable not set!")
+    
+    if not qdrant_api_key:
+        raise ValueError("QDRANT_API_KEY environment variable not set!")
     
     print("=" * 60)
     print("QDRANT COLLECTION SETUP")
@@ -66,17 +71,22 @@ def setup_qdrant_collection(
     print(f"Chunk overlap: {chunk_overlap}")
     print()
     
+    # Detect HTTPS from URL
+    use_https = ':443' in qdrant_url or qdrant_url.startswith('https://')
+    
     # Step 1: Check Qdrant connection
-    print("Step 1: Connecting to Qdrant...")
+    print("Step 1: Connecting to Qdrant Cloud...")
     try:
-        if qdrant_api_key:
-            client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key)
-        else:
-            client = QdrantClient(url=qdrant_url)
+        client = QdrantClient(
+            url=qdrant_url,
+            api_key=qdrant_api_key,
+            https=use_https,
+            timeout=60
+        )
         
         # Test connection
         collections = client.get_collections()
-        print(f"✅ Connected to Qdrant successfully!")
+        print(f"✅ Connected to Qdrant Cloud successfully!")
         print(f"   Existing collections: {[col.name for col in collections.collections]}")
         
         # Check if collection already exists
@@ -90,7 +100,11 @@ def setup_qdrant_collection(
             print(f"   ✅ Deleted.")
         
     except Exception as e:
-        print(f"❌ Failed to connect to Qdrant: {e}")
+        print(f"❌ Failed to connect to Qdrant Cloud: {e}")
+        print("\nTroubleshooting:")
+        print("1. Check your QDRANT_URL is correct")
+        print("2. Verify your QDRANT_API_KEY is valid")
+        print("3. Ensure your Qdrant Cloud cluster is running")
         return
     
     # Step 2: Load documents
@@ -171,7 +185,8 @@ def setup_qdrant_collection(
             url=qdrant_url,
             api_key=qdrant_api_key,
             collection_name=collection_name,
-            force_recreate=True
+            force_recreate=True,
+            https=use_https
         )
         
         # Verify collection
@@ -190,7 +205,7 @@ def setup_qdrant_collection(
     # Step 6: Test retrieval
     print("\nStep 6: Testing retrieval...")
     try:
-        test_query = "What are MOSFET die cracks?"
+        test_query = "What are common MOSFET failures?"
         results = vectorstore.similarity_search(test_query, k=3)
         print(f"✅ Retrieval test successful!")
         print(f"   Query: '{test_query}'")
@@ -205,7 +220,7 @@ def setup_qdrant_collection(
     print("\n" + "=" * 60)
     print("✅ SETUP COMPLETE!")
     print("=" * 60)
-    print(f"Collection '{collection_name}' is ready to use.")
+    print(f"Collection '{collection_name}' is ready to use in Qdrant Cloud.")
     print(f"Total vectors: {collection_info.points_count}")
     print("\nYou can now run your Streamlit app:")
     print("  streamlit run app.py")
@@ -224,8 +239,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--collection",
-        default="mosfet_docs",
-        help="Collection name (default: mosfet_docs)"
+        help="Collection name (default: FMEA_Handbook from env)"
     )
     parser.add_argument(
         "--url",
