@@ -7,7 +7,12 @@ from PIL import Image
 from src.utils.config import load_config, check_api_key
 from src.image_processing.classification import load_onnx_model, predict_image_class
 from src.rag.document_loader import load_and_process_documents
-from src.rag.vector_store import create_vectorstore
+from src.rag.vector_store import (
+    create_vectorstore, 
+    create_new_vectorstore_with_documents,
+    add_documents_to_vectorstore,
+    list_qdrant_collections
+)
 from src.rag.chains import create_rag_chain, create_vision_rag_chain
 from src.rag.embeddings import initialize_llm_and_embeddings
 
@@ -27,6 +32,16 @@ if 'report_generated' not in st.session_state:
     st.session_state.report_generated = False
 if 'openai_api_key' not in st.session_state:
     st.session_state.openai_api_key = ""
+if 'vectorstore' not in st.session_state:
+    st.session_state.vectorstore = None
+
+# Helper function to get secrets
+def get_secret(key, default=""):
+    """Get secret from Streamlit secrets or environment variables"""
+    try:
+        return st.secrets.get(key, os.environ.get(key, default))
+    except:
+        return os.environ.get(key, default)
 
 # Load configuration
 config = load_config()
@@ -36,49 +51,140 @@ st.title("🔬 MOSFET Die Crack Classification RAG System")
 st.markdown("Upload an image for die crack classification and get AI-powered analysis with technical documentation.")
 
 # Sidebar configuration
-st.sidebar.header("🔑 Configuration")
-openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=st.session_state.openai_api_key)
+st.sidebar.header("🔧 Configuration")
+
+# API Key handling with secrets support
+default_api_key = get_secret("OPENAI_API_KEY", "")
+openai_api_key = st.sidebar.text_input(
+    "OpenAI API Key", 
+    type="password", 
+    value=default_api_key,
+    help="Enter your OpenAI API key or configure in Streamlit secrets"
+)
+
 if openai_api_key:
     st.session_state.openai_api_key = openai_api_key
     os.environ["OPENAI_API_KEY"] = openai_api_key
 
+# Qdrant configuration
+st.sidebar.subheader("🗄️ Qdrant Configuration")
+qdrant_url = st.sidebar.text_input(
+    "Qdrant URL", 
+    value=get_secret("QDRANT_URL", "http://localhost:6333"),
+    help="Qdrant server URL (local or cloud)"
+)
+qdrant_api_key = st.sidebar.text_input(
+    "Qdrant API Key (if using cloud)", 
+    type="password",
+    value=get_secret("QDRANT_API_KEY", ""),
+    help="Required for Qdrant Cloud"
+)
+collection_name = st.sidebar.text_input(
+    "Collection Name",
+    value=config.get('rag', {}).get('collection_name', 'mosfet_docs'),
+    help="Name of your Qdrant collection"
+)
+
+# Store Qdrant config in environment and config
+if qdrant_url:
+    os.environ["QDRANT_URL"] = qdrant_url
+if qdrant_api_key:
+    os.environ["QDRANT_API_KEY"] = qdrant_api_key
+if collection_name:
+    config['rag']['collection_name'] = collection_name
+
+# Model configuration
 model_path = st.sidebar.text_input("ONNX Model Path", config['model']['path'])
-confidence_threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, config['rag']['confidence_threshold'])
-docs_path = st.sidebar.text_input("Documents Directory", config['documents']['static_path'])
+confidence_threshold = st.sidebar.slider(
+    "Confidence Threshold", 
+    0.0, 1.0, 
+    config['rag']['confidence_threshold']
+)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔄 Vectorstore Actions")
+
+# List available collections
+if st.sidebar.button("📋 List Collections"):
+    with st.spinner("Fetching collections..."):
+        qdrant_config = {'url': qdrant_url, 'api_key': qdrant_api_key if qdrant_api_key else None}
+        collections = list_qdrant_collections(qdrant_config)
+        if collections:
+            st.sidebar.success(f"Available collections: {', '.join(collections)}")
+        else:
+            st.sidebar.warning("No collections found or connection failed")
+
+# Reconnect to vectorstore
+if st.sidebar.button("🔌 Connect to Vectorstore"):
+    st.session_state.vectorstore = None
+    st.rerun()
+
+# Advanced: Create new collection (with warning)
+with st.sidebar.expander("⚠️ Advanced: Create New Collection"):
+    st.warning("This will use API credits to embed documents!")
+    docs_path = st.text_input("Documents Directory", config['documents']['static_path'])
+    if st.button("🆕 Create New Collection", type="secondary"):
+        with st.spinner("Loading and embedding documents..."):
+            rag_documents = load_and_process_documents(docs_path)
+            if rag_documents:
+                qdrant_config = {'url': qdrant_url, 'api_key': qdrant_api_key if qdrant_api_key else None}
+                generator_llm, embeddings = initialize_llm_and_embeddings()
+                if embeddings:
+                    vectorstore = create_new_vectorstore_with_documents(
+                        rag_documents, embeddings, config, qdrant_config
+                    )
+                    if vectorstore:
+                        st.session_state.vectorstore = vectorstore
+                        st.rerun()
 
 # Check if API key is provided
 if not check_api_key(st.session_state.openai_api_key):
     st.warning("⚠️ Please enter your OpenAI API key in the sidebar to proceed.")
     st.stop()
 
-# Initialize components
-generator_llm, embeddings = initialize_llm_and_embeddings()
+# Initialize components (cached)
+@st.cache_resource
+def get_llm_and_embeddings():
+    """Initialize LLM and embeddings (cached)"""
+    return initialize_llm_and_embeddings()
+
+generator_llm, embeddings = get_llm_and_embeddings()
 if not generator_llm or not embeddings:
     st.error("Failed to initialize LLM or embeddings. Check your API key.")
     st.stop()
 
-# Load documents and create vectorstore
-with st.spinner("Loading documents and creating vectorstore..."):
-    rag_documents = load_and_process_documents(docs_path)
-    st.write(f"DEBUG: Got {len(rag_documents) if rag_documents else 0} documents")
-    st.write(f"DEBUG: Embeddings object: {embeddings}")
-    st.write(f"DEBUG: Config: {config}")
-    
-    if rag_documents and embeddings:
-        vectorstore = create_vectorstore(rag_documents, embeddings, config)
-        st.write(f"DEBUG: Vectorstore result: {vectorstore}")
-    else:
-        st.error("Missing documents or embeddings for vectorstore creation")
-        vectorstore = None
+# Connect to existing vectorstore (NO re-embedding)
+if st.session_state.vectorstore is None:
+    with st.spinner("Connecting to Qdrant vectorstore..."):
+        try:
+            qdrant_config = {
+                'url': qdrant_url,
+                'api_key': qdrant_api_key if qdrant_api_key else None
+            }
+            
+            # Connect to EXISTING vectorstore (no embedding)
+            vectorstore = create_vectorstore(embeddings, config, qdrant_config)
+            
+            if vectorstore:
+                st.session_state.vectorstore = vectorstore
+            else:
+                st.error("Failed to connect to vectorstore. Please check your Qdrant configuration.")
+                
+        except Exception as e:
+            st.error(f"Error connecting to vectorstore: {str(e)}")
+            st.session_state.vectorstore = None
+
+vectorstore = st.session_state.vectorstore
 
 if not vectorstore:
-    st.warning("⚠️ Vectorstore not available. Document-based queries will not work.")
+    st.warning("⚠️ Vectorstore not connected. Please check your Qdrant configuration in the sidebar.")
+    st.info("💡 Tip: Make sure your Qdrant server is running and the collection exists.")
 
 # Main content area
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.header("📁 Image Upload")
+    st.header("📤 Image Upload")
     uploaded_file = st.file_uploader(
         "Choose a die image for crack analysis",
         type=['png', 'jpg', 'jpeg', 'gif', 'bmp'],
@@ -94,8 +200,12 @@ with col1:
         if st.button("🚀 Classify Die Crack", type="primary"):
             with st.spinner("Analyzing die image..."):
                 try:
-                    # Load model
-                    session = load_onnx_model(model_path)
+                    # Load model (cached)
+                    @st.cache_resource
+                    def get_model(path):
+                        return load_onnx_model(path)
+                    
+                    session = get_model(model_path)
                     if session:
                         # Classify
                         predicted_class, confidence = predict_image_class(
@@ -108,8 +218,11 @@ with col1:
                             st.session_state.confidence_score = confidence
                             
                             st.success(f"Classification complete!")
+                            st.rerun()
                         else:
                             st.error("Classification failed.")
+                    else:
+                        st.error("Failed to load ONNX model.")
                     
                 except Exception as e:
                     st.error(f"Error during classification: {str(e)}")
@@ -133,74 +246,106 @@ with col2:
         # Confidence warning
         if st.session_state.confidence_score < confidence_threshold:
             st.warning(f"⚠️ Low confidence ({st.session_state.confidence_score:.2%}). Results may be unreliable.")
+    else:
+        st.info("ℹ️ Upload and classify an image to see results here.")
 
 # RAG Query Section
 st.header("🤖 Technical Analysis & Documentation Query")
 
 # Create RAG chains
 if vectorstore:
-    technical_rag_chain = create_rag_chain(vectorstore, generator_llm)
-    vision_rag_chain = create_vision_rag_chain(vectorstore, generator_llm)
+    try:
+        technical_rag_chain = create_rag_chain(vectorstore, generator_llm)
+        vision_rag_chain = create_vision_rag_chain(vectorstore, generator_llm)
 
-    col3, col4 = st.columns([1, 1])
-    
-    with col3:
-        st.subheader("📚 General Technical Query")
-        technical_question = st.text_area(
-            "Ask about MOSFET die manufacturing, defects, or processes:",
-            placeholder="What are the common causes of die cracks in MOSFET manufacturing?"
-        )
+        col3, col4 = st.columns([1, 1])
         
-        if st.button("🔍 Query Documentation") and technical_question:
-            with st.spinner("Searching technical documentation..."):
-                try:
-                    response = technical_rag_chain.invoke(technical_question)
-                    st.markdown("**Response:**")
-                    st.markdown(response)
-                except Exception as e:
-                    st.error(f"Error querying documentation: {e}")
-    
-    with col4:
-        st.subheader("🔬 Image-Specific Analysis")
-        if st.session_state.classification_result:
-            vision_question = st.text_area(
-                "Ask about the classified image:",
-                placeholder="What should I do about this die crack classification?",
-                key="vision_question"
+        with col3:
+            st.subheader("📚 General Technical Query")
+            technical_question = st.text_area(
+                "Ask about MOSFET die manufacturing, defects, or processes:",
+                placeholder="What are the common causes of die cracks in MOSFET manufacturing?",
+                key="tech_query"
             )
             
-            if st.button("🔍 Analyze Classification") and vision_question:
-                with st.spinner("Analyzing classification with documentation..."):
+            if st.button("🔍 Query Documentation") and technical_question:
+                with st.spinner("Searching technical documentation..."):
                     try:
-                        vision_input = {
-                            "image_class": st.session_state.classification_result,
-                            "confidence": st.session_state.confidence_score,
-                            "question": vision_question
-                        }
-                        response = vision_rag_chain.invoke(vision_input)
-                        st.markdown("**Analysis:**")
+                        response = technical_rag_chain.invoke(technical_question)
+                        st.markdown("**Response:**")
                         st.markdown(response)
                     except Exception as e:
-                        st.error(f"Error analyzing classification: {e}")
-        else:
-            st.info("ℹ️ Classify an image first to enable image-specific analysis.")
+                        st.error(f"Error querying documentation: {e}")
+        
+        with col4:
+            st.subheader("🔬 Image-Specific Analysis")
+            if st.session_state.classification_result:
+                vision_question = st.text_area(
+                    "Ask about the classified image:",
+                    placeholder="What should I do about this die crack classification?",
+                    key="vision_question"
+                )
+                
+                if st.button("🔍 Analyze Classification") and vision_question:
+                    with st.spinner("Analyzing classification with documentation..."):
+                        try:
+                            vision_input = {
+                                "image_class": st.session_state.classification_result,
+                                "confidence": st.session_state.confidence_score,
+                                "question": vision_question
+                            }
+                            response = vision_rag_chain.invoke(vision_input)
+                            st.markdown("**Analysis:**")
+                            st.markdown(response)
+                        except Exception as e:
+                            st.error(f"Error analyzing classification: {e}")
+            else:
+                st.info("ℹ️ Classify an image first to enable image-specific analysis.")
+    except Exception as e:
+        st.error(f"Error creating RAG chains: {e}")
 else:
-    st.warning("⚠️ Vectorstore not available. Please check your documents directory.")
+    st.warning("⚠️ Vectorstore not connected. Please check your Qdrant configuration in the sidebar.")
 
 # System Status
 with st.expander("🔧 System Status"):
     st.write("**Component Status:**")
+    
+    # Check Qdrant connection
+    qdrant_status = "❌ Not connected"
+    points_count = 0
+    if vectorstore:
+        try:
+            # Try to get collection info
+            from qdrant_client import QdrantClient
+            client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key if qdrant_api_key else None)
+            collection_info = client.get_collection(collection_name)
+            points_count = collection_info.points_count
+            qdrant_status = f"✅ Connected ({points_count} vectors)"
+        except:
+            qdrant_status = "✅ Connected (info unavailable)"
+    
     status_data = {
-        "Component": ["OpenAI API", "ONNX Model", "Vectorstore", "Documents"],
+        "Component": [
+            "OpenAI API", 
+            "ONNX Model", 
+            "Vectorstore", 
+            "Qdrant Collection",
+            "RAG Chains"
+        ],
         "Status": [
             "✅ Connected" if st.session_state.openai_api_key else "❌ Not configured",
             "✅ Ready" if os.path.exists(model_path) else "❌ Model not found",
-            "✅ Ready" if vectorstore else "❌ Not available",
-            f"✅ {len(rag_documents)} docs loaded" if rag_documents else "❌ No documents"
+            "✅ Connected" if vectorstore else "❌ Not connected",
+            qdrant_status,
+            "✅ Ready" if vectorstore else "❌ Not available"
         ]
     }
     st.table(pd.DataFrame(status_data))
+    
+    st.info(f"🔗 Qdrant URL: {qdrant_url}")
+    st.info(f"📦 Collection: {collection_name}")
 
 # Footer
 st.markdown("---")
-st.markdown("*Powered by ONNX, LangChain, LangGraph, Qdrant, and OpenAI*")
+st.markdown("*Powered by ONNX, LangChain, Qdrant, and OpenAI*")
+st.caption("💡 This app connects to your existing Qdrant vectorstore without re-embedding documents.")
