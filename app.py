@@ -66,31 +66,43 @@ if openai_api_key:
     st.session_state.openai_api_key = openai_api_key
     os.environ["OPENAI_API_KEY"] = openai_api_key
 
-# Qdrant configuration
+# Qdrant configuration with your specific setup
 st.sidebar.subheader("🗄️ Qdrant Configuration")
+
+# Default to your Qdrant Cloud URL
+default_qdrant_url = get_secret("QDRANT_URL", "https://a56715f1-e0ff-43cc-819a-66f55e1c3a52.us-east-1.aws.cloud.qdrant.io:443")
 qdrant_url = st.sidebar.text_input(
     "Qdrant URL", 
-    value=get_secret("QDRANT_URL", "http://localhost:6333"),
-    help="Qdrant server URL (local or cloud)"
-)
-qdrant_api_key = st.sidebar.text_input(
-    "Qdrant API Key (if using cloud)", 
-    type="password",
-    value=get_secret("QDRANT_API_KEY", ""),
-    help="Required for Qdrant Cloud"
-)
-collection_name = st.sidebar.text_input(
-    "Collection Name",
-    value=config.get('rag', {}).get('collection_name', 'mosfet_docs'),
-    help="Name of your Qdrant collection"
+    value=default_qdrant_url,
+    help="Your Qdrant Cloud URL (port 443 for HTTPS)"
 )
 
-# Store Qdrant config in environment and config
+default_qdrant_api_key = get_secret("QDRANT_API_KEY", "")
+qdrant_api_key = st.sidebar.text_input(
+    "Qdrant API Key", 
+    type="password",
+    value=default_qdrant_api_key,
+    help="Your Qdrant Cloud API key"
+)
+
+# Default to your collection name - with proper fallback
+default_collection = get_secret("QDRANT_COLLECTION", "")
+if not default_collection:
+    default_collection = "NexPert"  # Use one of your existing collections
+
+collection_name = st.sidebar.text_input(
+    "Collection Name",
+    value=default_collection,
+    help="Name of your Qdrant collection (Available: FMEA_Synth, NexPert)"
+)
+
+# Store Qdrant config in environment
 if qdrant_url:
     os.environ["QDRANT_URL"] = qdrant_url
 if qdrant_api_key:
     os.environ["QDRANT_API_KEY"] = qdrant_api_key
 if collection_name:
+    os.environ["QDRANT_COLLECTION"] = collection_name
     config['rag']['collection_name'] = collection_name
 
 # Model configuration
@@ -107,15 +119,23 @@ st.sidebar.subheader("🔄 Vectorstore Actions")
 # List available collections
 if st.sidebar.button("📋 List Collections"):
     with st.spinner("Fetching collections..."):
-        qdrant_config = {'url': qdrant_url, 'api_key': qdrant_api_key if qdrant_api_key else None}
+        qdrant_config = {
+            'url': qdrant_url, 
+            'api_key': qdrant_api_key if qdrant_api_key else None,
+            'collection_name': collection_name
+        }
         collections = list_qdrant_collections(qdrant_config)
         if collections:
             st.sidebar.success(f"Available collections: {', '.join(collections)}")
+            if collection_name in collections:
+                st.sidebar.info(f"✅ Your collection '{collection_name}' exists!")
+            else:
+                st.sidebar.warning(f"⚠️ Collection '{collection_name}' not found. Available: {', '.join(collections)}")
         else:
             st.sidebar.warning("No collections found or connection failed")
 
 # Reconnect to vectorstore
-if st.sidebar.button("🔌 Connect to Vectorstore"):
+if st.sidebar.button("🔌 Reconnect to Vectorstore"):
     st.session_state.vectorstore = None
     st.rerun()
 
@@ -127,7 +147,11 @@ with st.sidebar.expander("⚠️ Advanced: Create New Collection"):
         with st.spinner("Loading and embedding documents..."):
             rag_documents = load_and_process_documents(docs_path)
             if rag_documents:
-                qdrant_config = {'url': qdrant_url, 'api_key': qdrant_api_key if qdrant_api_key else None}
+                qdrant_config = {
+                    'url': qdrant_url, 
+                    'api_key': qdrant_api_key if qdrant_api_key else None,
+                    'collection_name': collection_name
+                }
                 generator_llm, embeddings = initialize_llm_and_embeddings()
                 if embeddings:
                     vectorstore = create_new_vectorstore_with_documents(
@@ -159,7 +183,8 @@ if st.session_state.vectorstore is None:
         try:
             qdrant_config = {
                 'url': qdrant_url,
-                'api_key': qdrant_api_key if qdrant_api_key else None
+                'api_key': qdrant_api_key if qdrant_api_key else None,
+                'collection_name': collection_name
             }
             
             # Connect to EXISTING vectorstore (no embedding)
@@ -178,7 +203,7 @@ vectorstore = st.session_state.vectorstore
 
 if not vectorstore:
     st.warning("⚠️ Vectorstore not connected. Please check your Qdrant configuration in the sidebar.")
-    st.info("💡 Tip: Make sure your Qdrant server is running and the collection exists.")
+    st.info(f"💡 Tip: Make sure collection '{collection_name}' exists in your Qdrant Cloud instance.")
 
 # Main content area
 col1, col2 = st.columns([1, 1])
@@ -317,7 +342,11 @@ with st.expander("🔧 System Status"):
         try:
             # Try to get collection info
             from qdrant_client import QdrantClient
-            client = QdrantClient(url=qdrant_url, api_key=qdrant_api_key if qdrant_api_key else None)
+            client = QdrantClient(
+                url=qdrant_url, 
+                api_key=qdrant_api_key if qdrant_api_key else None,
+                https=True if ':443' in qdrant_url else None
+            )
             collection_info = client.get_collection(collection_name)
             points_count = collection_info.points_count
             qdrant_status = f"✅ Connected ({points_count} vectors)"
@@ -344,8 +373,10 @@ with st.expander("🔧 System Status"):
     
     st.info(f"🔗 Qdrant URL: {qdrant_url}")
     st.info(f"📦 Collection: {collection_name}")
+    if ':443' in qdrant_url:
+        st.info("🔒 Using HTTPS (port 443)")
 
 # Footer
 st.markdown("---")
-st.markdown("*Powered by ONNX, LangChain, Qdrant, and OpenAI*")
+st.markdown("*Powered by ONNX, LangChain, Qdrant Cloud, and OpenAI*")
 st.caption("💡 This app connects to your existing Qdrant vectorstore without re-embedding documents.")
