@@ -188,13 +188,33 @@ if not check_api_key(st.session_state.openai_api_key):
     st.warning("⚠️ Please enter your OpenAI API key in the sidebar to proceed.")
     st.stop()
 
-# Initialize components (cached)
+# Initialize components (cached with embedding model as key)
 @st.cache_resource
-def get_llm_and_embeddings():
-    """Initialize LLM and embeddings (cached)"""
-    return initialize_llm_and_embeddings()
+def get_llm_and_embeddings(_embedding_model):
+    """Initialize LLM and embeddings (cached per model)"""
+    from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+    from ragas.llms import LangchainLLMWrapper
+    
+    try:
+        st.info(f"Initializing embeddings with model: {_embedding_model}")
+        generator_llm = LangchainLLMWrapper(ChatOpenAI(model="gpt-4o-mini", temperature=0))
+        embeddings = OpenAIEmbeddings(model=_embedding_model)
+        
+        # Test embeddings to verify dimension
+        test_vec = embeddings.embed_query("test")
+        st.success(f"✅ Embeddings loaded: {len(test_vec)} dimensions")
+        
+        return generator_llm, embeddings
+    except Exception as e:
+        st.error(f"Error initializing LLM: {e}")
+        return None, None
 
-generator_llm, embeddings = get_llm_and_embeddings()
+# Clear cache button in sidebar
+if st.sidebar.button("🗑️ Clear Cache & Reload"):
+    st.cache_resource.clear()
+    st.rerun()
+
+generator_llm, embeddings = get_llm_and_embeddings(embedding_model)
 if not generator_llm or not embeddings:
     st.error("Failed to initialize LLM or embeddings. Check your API key.")
     st.stop()
