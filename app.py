@@ -105,6 +105,28 @@ if collection_name:
     os.environ["QDRANT_COLLECTION"] = collection_name
     config['rag']['collection_name'] = collection_name
 
+# Embedding model configuration
+st.sidebar.subheader("🧠 Embedding Model")
+embedding_model_option = st.sidebar.selectbox(
+    "Embedding Model",
+    options=[
+        "text-embedding-3-large (3072-dim)",
+        "text-embedding-ada-002 (1536-dim)"
+    ],
+    index=0,  # Default to 3-large to match FMEA_Synth
+    help="Must match your collection's dimensions"
+)
+
+# Extract model name
+if "3-large" in embedding_model_option:
+    embedding_model = "text-embedding-3-large"
+    expected_dim = 3072
+else:
+    embedding_model = "text-embedding-ada-002"
+    expected_dim = 1536
+
+st.sidebar.caption(f"Expected dimension: {expected_dim}")
+
 # Model configuration
 model_path = st.sidebar.text_input("ONNX Model Path", config['model']['path'])
 confidence_threshold = st.sidebar.slider(
