@@ -3,19 +3,18 @@ import pandas as pd
 import os
 from PIL import Image
 from datetime import datetime
-import uuid
 
 # Local imports
 from src.utils.config import load_config, check_api_key
 from src.image_processing.classification import load_onnx_model, predict_image_class
 from src.rag.document_loader import load_and_process_documents
-from src.rag.vector_store import create_vectorstore
+from src.rag.vector_store import (
+    create_vectorstore, 
+    create_new_vectorstore_with_documents,
+    add_documents_to_vectorstore,
+    list_qdrant_collections
+)
 from src.rag.chains import create_rag_chain, create_vision_rag_chain
-from src.rag.embeddings import initialize_llm_and_embeddings
-
-# LangSmith imports
-from langsmith import Client
-from langsmith.run_helpers import traceable
 
 # Page configuration
 st.set_page_config(
@@ -33,12 +32,35 @@ if 'report_generated' not in st.session_state:
     st.session_state.report_generated = False
 if 'openai_api_key' not in st.session_state:
     st.session_state.openai_api_key = ""
-if 'langsmith_api_key' not in st.session_state:
-    st.session_state.langsmith_api_key = ""
-if 'langsmith_project' not in st.session_state:
-    st.session_state.langsmith_project = f"MOSFET-RAG-{uuid.uuid4().hex[:8]}"
-if 'langsmith_client' not in st.session_state:
-    st.session_state.langsmith_client = None
+if 'vectorstore' not in st.session_state:
+    st.session_state.vectorstore = None
+if 'session_id' not in st.session_state:
+    st.session_state.session_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# Helper function to get secrets
+def get_secret(key, default=""):
+    """Get secret from Streamlit secrets or environment variables"""
+    try:
+        return st.secrets.get(key, os.environ.get(key, default))
+    except:
+        return os.environ.get(key, default)
+
+# Configure LangSmith tracing
+def setup_langsmith():
+    """Setup LangSmith tracing"""
+    langsmith_api_key = get_secret("LANGCHAIN_API_KEY", "")
+    langsmith_tracing = get_secret("LANGCHAIN_TRACING_V2", "")
+    langsmith_project = get_secret("LANGCHAIN_PROJECT", "MOSFET-RAG-Production")
+    
+    if langsmith_api_key:
+        os.environ["LANGCHAIN_TRACING_V2"] = "true"
+        os.environ["LANGCHAIN_API_KEY"] = langsmith_api_key
+        os.environ["LANGCHAIN_PROJECT"] = langsmith_project
+        return True
+    return False
+
+# Setup LangSmith
+langsmith_enabled = setup_langsmith()
 
 # Load configuration
 config = load_config()
@@ -48,151 +70,213 @@ st.title("🔬 MOSFET Die Crack Classification RAG System")
 st.markdown("Upload an image for die crack classification and get AI-powered analysis with technical documentation.")
 
 # Sidebar configuration
-st.sidebar.header("🔑 Configuration")
+st.sidebar.header("🔧 Configuration")
 
-# OpenAI API Key
-openai_api_key = st.sidebar.text_input("OpenAI API Key", type="password", value=st.session_state.openai_api_key)
+# API Key handling with secrets support
+default_api_key = get_secret("OPENAI_API_KEY", "")
+openai_api_key = st.sidebar.text_input(
+    "OpenAI API Key", 
+    type="password", 
+    value=default_api_key,
+    help="Enter your OpenAI API key or configure in Streamlit secrets"
+)
+
 if openai_api_key:
     st.session_state.openai_api_key = openai_api_key
     os.environ["OPENAI_API_KEY"] = openai_api_key
 
-# LangSmith Configuration
-st.sidebar.subheader("📊 LangSmith Tracking")
-langsmith_api_key = st.sidebar.text_input("LangSmith API Key", type="password", value=st.session_state.langsmith_api_key)
-if langsmith_api_key:
-    st.session_state.langsmith_api_key = langsmith_api_key
-    os.environ["LANGCHAIN_API_KEY"] = langsmith_api_key
-    os.environ["LANGCHAIN_TRACING_V2"] = "true"
-    
-    # Initialize LangSmith client
-    try:
-        st.session_state.langsmith_client = Client()
-        st.sidebar.success("✅ LangSmith tracking enabled")
-    except Exception as e:
-        st.sidebar.error(f"❌ LangSmith connection failed: {str(e)}")
-        st.session_state.langsmith_client = None
+# Qdrant configuration with your specific setup
+st.sidebar.subheader("🗄️ Qdrant Configuration")
 
-langsmith_project = st.sidebar.text_input("LangSmith Project Name", value=st.session_state.langsmith_project)
-if langsmith_project:
-    st.session_state.langsmith_project = langsmith_project
-    os.environ["LANGCHAIN_PROJECT"] = langsmith_project
+# Default to your Qdrant Cloud URL
+default_qdrant_url = get_secret("QDRANT_URL", "https://a56715f1-e0ff-43cc-819a-66f55e1c3a52.us-east-1-1.aws.cloud.qdrant.io")
+qdrant_url = st.sidebar.text_input(
+    "Qdrant URL", 
+    value=default_qdrant_url,
+    help="Your Qdrant Cloud URL"
+)
 
-# Other configuration
+default_qdrant_api_key = get_secret("QDRANT_API_KEY", "")
+qdrant_api_key = st.sidebar.text_input(
+    "Qdrant API Key", 
+    type="password",
+    value=default_qdrant_api_key,
+    help="Your Qdrant Cloud API key"
+)
+
+# Default to your collection name
+default_collection = get_secret("QDRANT_COLLECTION", "")
+if not default_collection:
+    default_collection = "FMEA_Synth"  # Your collection
+
+collection_name = st.sidebar.text_input(
+    "Collection Name",
+    value=default_collection,
+    help="Name of your Qdrant collection (Available: FMEA_Synth, NexPert)"
+)
+
+# Store Qdrant config in environment
+if qdrant_url:
+    os.environ["QDRANT_URL"] = qdrant_url
+if qdrant_api_key:
+    os.environ["QDRANT_API_KEY"] = qdrant_api_key
+if collection_name:
+    os.environ["QDRANT_COLLECTION"] = collection_name
+    config['rag']['collection_name'] = collection_name
+
+# Embedding model configuration
+st.sidebar.subheader("🧠 Embedding Model")
+embedding_model_option = st.sidebar.selectbox(
+    "Embedding Model",
+    options=[
+        "text-embedding-3-large (3072-dim)",
+        "text-embedding-ada-002 (1536-dim)"
+    ],
+    index=0,  # Default to 3-large to match FMEA_Synth
+    help="Must match your collection's dimensions. FMEA_Synth uses 3072-dim"
+)
+
+# Extract model name
+if "3-large" in embedding_model_option:
+    embedding_model = "text-embedding-3-large"
+    expected_dim = 3072
+else:
+    embedding_model = "text-embedding-ada-002"
+    expected_dim = 1536
+
+st.sidebar.caption(f"Expected dimension: {expected_dim}")
+
+# Model configuration
 model_path = st.sidebar.text_input("ONNX Model Path", config['model']['path'])
-confidence_threshold = st.sidebar.slider("Confidence Threshold", 0.0, 1.0, config['rag']['confidence_threshold'])
-docs_path = st.sidebar.text_input("Documents Directory", config['documents']['static_path'])
+confidence_threshold = st.sidebar.slider(
+    "Confidence Threshold", 
+    0.0, 1.0, 
+    config['rag']['confidence_threshold']
+)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔄 Vectorstore Actions")
+
+# List available collections
+if st.sidebar.button("📋 List Collections"):
+    with st.spinner("Fetching collections..."):
+        qdrant_config = {
+            'url': qdrant_url, 
+            'api_key': qdrant_api_key if qdrant_api_key else None,
+            'collection_name': collection_name
+        }
+        collections = list_qdrant_collections(qdrant_config)
+        if collections:
+            st.sidebar.success(f"Available collections: {', '.join(collections)}")
+            if collection_name in collections:
+                st.sidebar.info(f"✅ Your collection '{collection_name}' exists!")
+            else:
+                st.sidebar.warning(f"⚠️ Collection '{collection_name}' not found. Available: {', '.join(collections)}")
+        else:
+            st.sidebar.warning("No collections found or connection failed")
+
+# Clear cache button
+if st.sidebar.button("🗑️ Clear Cache & Reload"):
+    st.cache_resource.clear()
+    st.rerun()
+
+# Reconnect to vectorstore
+if st.sidebar.button("🔌 Reconnect to Vectorstore"):
+    st.session_state.vectorstore = None
+    st.rerun()
+
+# Advanced: Create new collection (with warning)
+with st.sidebar.expander("⚠️ Advanced: Create New Collection"):
+    st.warning("This will use API credits to embed documents!")
+    docs_path = st.text_input("Documents Directory", config['documents']['static_path'])
+    if st.button("🆕 Create New Collection", type="secondary"):
+        with st.spinner("Loading and embedding documents..."):
+            rag_documents = load_and_process_documents(docs_path)
+            if rag_documents:
+                qdrant_config = {
+                    'url': qdrant_url, 
+                    'api_key': qdrant_api_key if qdrant_api_key else None,
+                    'collection_name': collection_name
+                }
+                from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+                from ragas.llms import LangchainLLMWrapper
+                
+                generator_llm = LangchainLLMWrapper(ChatOpenAI(model="gpt-4o-mini", temperature=0))
+                embeddings = OpenAIEmbeddings(model=embedding_model)
+                
+                if embeddings:
+                    vectorstore = create_new_vectorstore_with_documents(
+                        rag_documents, embeddings, config, qdrant_config
+                    )
+                    if vectorstore:
+                        st.session_state.vectorstore = vectorstore
+                        st.rerun()
 
 # Check if API key is provided
 if not check_api_key(st.session_state.openai_api_key):
     st.warning("⚠️ Please enter your OpenAI API key in the sidebar to proceed.")
     st.stop()
 
-# Initialize components
-generator_llm, embeddings = initialize_llm_and_embeddings()
+# Initialize components (cached with embedding model as key)
+@st.cache_resource
+def get_llm_and_embeddings(_embedding_model):
+    """Initialize LLM and embeddings (cached per model)"""
+    from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+    from ragas.llms import LangchainLLMWrapper
+    
+    try:
+        st.info(f"Initializing embeddings with model: {_embedding_model}")
+        generator_llm = LangchainLLMWrapper(ChatOpenAI(model="gpt-4o-mini", temperature=0))
+        embeddings = OpenAIEmbeddings(model=_embedding_model)
+        
+        # Test embeddings to verify dimension
+        test_vec = embeddings.embed_query("test")
+        st.success(f"✅ Embeddings loaded: {len(test_vec)} dimensions")
+        
+        return generator_llm, embeddings
+    except Exception as e:
+        st.error(f"Error initializing LLM: {e}")
+        return None, None
+
+generator_llm, embeddings = get_llm_and_embeddings(embedding_model)
+
 if not generator_llm or not embeddings:
     st.error("Failed to initialize LLM or embeddings. Check your API key.")
     st.stop()
 
-# Load documents and create vectorstore
-with st.spinner("Loading documents and creating vectorstore..."):
-    rag_documents = load_and_process_documents(docs_path)
-    
-    if rag_documents and embeddings:
-        vectorstore = create_vectorstore(rag_documents, embeddings, config)
-    else:
-        st.error("Missing documents or embeddings for vectorstore creation")
-        vectorstore = None
+# Connect to existing vectorstore (NO re-embedding)
+if st.session_state.vectorstore is None:
+    with st.spinner("Connecting to Qdrant vectorstore..."):
+        try:
+            qdrant_config = {
+                'url': qdrant_url,
+                'api_key': qdrant_api_key if qdrant_api_key else None,
+                'collection_name': collection_name
+            }
+            
+            # Connect to EXISTING vectorstore (no embedding)
+            vectorstore = create_vectorstore(embeddings, config, qdrant_config)
+            
+            if vectorstore:
+                st.session_state.vectorstore = vectorstore
+            else:
+                st.error("Failed to connect to vectorstore. Please check your Qdrant configuration.")
+                
+        except Exception as e:
+            st.error(f"Error connecting to vectorstore: {str(e)}")
+            st.session_state.vectorstore = None
+
+vectorstore = st.session_state.vectorstore
 
 if not vectorstore:
-    st.warning("⚠️ Vectorstore not available. Document-based queries will not work.")
-
-# Helper function to log to LangSmith
-def log_to_langsmith(query_type, input_data, output_data, metadata=None):
-    """Log interactions to LangSmith"""
-    if st.session_state.langsmith_client:
-        try:
-            # Create a run in LangSmith
-            run_id = str(uuid.uuid4())
-            
-            # Prepare metadata
-            run_metadata = {
-                "query_type": query_type,
-                "timestamp": datetime.now().isoformat(),
-                "user_session": st.session_state.get('session_id', 'unknown'),
-                **(metadata or {})
-            }
-            
-            # Log the interaction
-            st.session_state.langsmith_client.create_run(
-                name=f"{query_type}_query",
-                run_id=run_id,
-                run_type="chain",
-                inputs=input_data,
-                outputs=output_data,
-                project_name=st.session_state.langsmith_project,
-                extra=run_metadata
-            )
-            
-            return run_id
-        except Exception as e:
-            st.sidebar.warning(f"LangSmith logging failed: {str(e)}")
-            return None
-    return None
-
-# Wrapped RAG functions with LangSmith tracking
-@traceable(run_type="chain", name="technical_query")
-def execute_technical_query(chain, question):
-    """Execute technical query with LangSmith tracking"""
-    try:
-        response = chain.invoke(question)
-        
-        # Log to LangSmith
-        log_to_langsmith(
-            query_type="technical_documentation",
-            input_data={"question": question},
-            output_data={"answer": response},
-            metadata={
-                "vectorstore_used": vectorstore is not None,
-                "confidence_threshold": confidence_threshold
-            }
-        )
-        
-        return response
-    except Exception as e:
-        st.error(f"Error during query: {str(e)}")
-        return None
-
-@traceable(run_type="chain", name="vision_query")
-def execute_vision_query(chain, vision_input):
-    """Execute vision query with LangSmith tracking"""
-    try:
-        response = chain.invoke(vision_input)
-        
-        # Log to LangSmith
-        log_to_langsmith(
-            query_type="image_specific_analysis",
-            input_data={
-                "image_class": vision_input.get("image_class"),
-                "confidence": vision_input.get("confidence"),
-                "question": vision_input.get("question")
-            },
-            output_data={"analysis": response},
-            metadata={
-                "classification": vision_input.get("image_class"),
-                "confidence_score": vision_input.get("confidence")
-            }
-        )
-        
-        return response
-    except Exception as e:
-        st.error(f"Error during analysis: {str(e)}")
-        return None
+    st.warning("⚠️ Vectorstore not connected. Please check your Qdrant configuration in the sidebar.")
+    st.info(f"💡 Tip: Make sure collection '{collection_name}' exists and embedding model matches (FMEA_Synth uses 3072-dim).")
 
 # Main content area
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.header("🖼️ Image Upload")
+    st.header("📤 Image Upload")
     uploaded_file = st.file_uploader(
         "Choose a die image for crack analysis",
         type=['png', 'jpg', 'jpeg', 'gif', 'bmp'],
@@ -208,8 +292,12 @@ with col1:
         if st.button("🚀 Classify Die Crack", type="primary"):
             with st.spinner("Analyzing die image..."):
                 try:
-                    # Load model
-                    session = load_onnx_model(model_path)
+                    # Load model (cached)
+                    @st.cache_resource
+                    def get_model(path):
+                        return load_onnx_model(path)
+                    
+                    session = get_model(model_path)
                     if session:
                         # Classify
                         predicted_class, confidence = predict_image_class(
@@ -221,23 +309,12 @@ with col1:
                             st.session_state.classification_result = predicted_class
                             st.session_state.confidence_score = confidence
                             
-                            # Log classification to LangSmith
-                            log_to_langsmith(
-                                query_type="image_classification",
-                                input_data={"image_name": uploaded_file.name},
-                                output_data={
-                                    "predicted_class": predicted_class,
-                                    "confidence": confidence
-                                },
-                                metadata={
-                                    "model_path": model_path,
-                                    "image_size": image.size
-                                }
-                            )
-                            
                             st.success(f"Classification complete!")
+                            st.rerun()
                         else:
                             st.error("Classification failed.")
+                    else:
+                        st.error("Failed to load ONNX model.")
                     
                 except Exception as e:
                     st.error(f"Error during classification: {str(e)}")
@@ -261,75 +338,159 @@ with col2:
         # Confidence warning
         if st.session_state.confidence_score < confidence_threshold:
             st.warning(f"⚠️ Low confidence ({st.session_state.confidence_score:.2%}). Results may be unreliable.")
+    else:
+        st.info("ℹ️ Upload and classify an image to see results here.")
 
 # RAG Query Section
 st.header("🤖 Technical Analysis & Documentation Query")
 
 # Create RAG chains
 if vectorstore:
-    technical_rag_chain = create_rag_chain(vectorstore, generator_llm)
-    vision_rag_chain = create_vision_rag_chain(vectorstore, generator_llm)
+    try:
+        technical_rag_chain = create_rag_chain(vectorstore, generator_llm)
+        vision_rag_chain = create_vision_rag_chain(vectorstore, generator_llm)
 
-    col3, col4 = st.columns([1, 1])
-    
-    with col3:
-        st.subheader("📚 General Technical Query")
-        technical_question = st.text_area(
-            "Ask about MOSFET die manufacturing, defects, or processes:",
-            placeholder="What are the common causes of die cracks in MOSFET manufacturing?"
-        )
+        col3, col4 = st.columns([1, 1])
         
-        if st.button("🔍 Query Documentation") and technical_question:
-            with st.spinner("Searching technical documentation..."):
-                response = execute_technical_query(technical_rag_chain, technical_question)
-                if response:
-                    st.markdown("**Response:**")
-                    st.markdown(response)
-    
-    with col4:
-        st.subheader("🔬 Image-Specific Analysis")
-        if st.session_state.classification_result:
-            vision_question = st.text_area(
-                "Ask about the classified image:",
-                placeholder="What should I do about this die crack classification?",
-                key="vision_question"
+        with col3:
+            st.subheader("📚 General Technical Query")
+            technical_question = st.text_area(
+                "Ask about MOSFET die manufacturing, defects, or processes:",
+                placeholder="What are the common causes of die cracks in MOSFET manufacturing?",
+                key="tech_query"
             )
             
-            if st.button("🔍 Analyze Classification") and vision_question:
-                with st.spinner("Analyzing classification with documentation..."):
-                    vision_input = {
-                        "image_class": st.session_state.classification_result,
-                        "confidence": st.session_state.confidence_score,
-                        "question": vision_question
-                    }
-                    response = execute_vision_query(vision_rag_chain, vision_input)
-                    if response:
-                        st.markdown("**Analysis:**")
+            if st.button("🔍 Query Documentation") and technical_question:
+                with st.spinner("Searching technical documentation..."):
+                    try:
+                        # Add metadata for LangSmith tracking
+                        from langsmith import traceable
+                        
+                        @traceable(
+                            name="technical_rag_query",
+                            tags=["rag", "technical", "documentation"],
+                            metadata={
+                                "session_id": st.session_state.session_id,
+                                "collection": collection_name,
+                                "embedding_model": embedding_model
+                            }
+                        )
+                        def track_query(question):
+                            return technical_rag_chain.invoke(question)
+                        
+                        response = track_query(technical_question)
+                        st.markdown("**Response:**")
                         st.markdown(response)
-        else:
-            st.info("ℹ️ Classify an image first to enable image-specific analysis.")
+                        
+                        # Show LangSmith link if enabled
+                        if langsmith_enabled:
+                            st.caption("🔗 Query tracked in LangSmith")
+                            
+                    except Exception as e:
+                        st.error(f"Error querying documentation: {e}")
+        
+        with col4:
+            st.subheader("🔬 Image-Specific Analysis")
+            if st.session_state.classification_result:
+                vision_question = st.text_area(
+                    "Ask about the classified image:",
+                    placeholder="What should I do about this die crack classification?",
+                    key="vision_question"
+                )
+                
+                if st.button("🔍 Analyze Classification") and vision_question:
+                    with st.spinner("Analyzing classification with documentation..."):
+                        try:
+                            from langsmith import traceable
+                            
+                            @traceable(
+                                name="vision_rag_analysis",
+                                tags=["rag", "vision", "classification"],
+                                metadata={
+                                    "session_id": st.session_state.session_id,
+                                    "classification": st.session_state.classification_result,
+                                    "confidence": st.session_state.confidence_score,
+                                    "collection": collection_name
+                                }
+                            )
+                            def track_vision_query(vision_input):
+                                return vision_rag_chain.invoke(vision_input)
+                            
+                            vision_input = {
+                                "image_class": st.session_state.classification_result,
+                                "confidence": st.session_state.confidence_score,
+                                "question": vision_question
+                            }
+                            response = track_vision_query(vision_input)
+                            st.markdown("**Analysis:**")
+                            st.markdown(response)
+                            
+                            # Show LangSmith link if enabled
+                            if langsmith_enabled:
+                                st.caption("🔗 Analysis tracked in LangSmith")
+                                
+                        except Exception as e:
+                            st.error(f"Error analyzing classification: {e}")
+            else:
+                st.info("ℹ️ Classify an image first to enable image-specific analysis.")
+    except Exception as e:
+        st.error(f"Error creating RAG chains: {e}")
 else:
-    st.warning("⚠️ Vectorstore not available. Please check your documents directory.")
+    st.warning("⚠️ Vectorstore not connected. Please check your Qdrant configuration in the sidebar.")
 
 # System Status
 with st.expander("🔧 System Status"):
     st.write("**Component Status:**")
+    
+    # Check Qdrant connection
+    qdrant_status = "❌ Not connected"
+    points_count = 0
+    if vectorstore:
+        try:
+            # Try to get collection info
+            from qdrant_client import QdrantClient
+            client = QdrantClient(
+                url=qdrant_url, 
+                api_key=qdrant_api_key if qdrant_api_key else None,
+                https=True
+            )
+            collection_info = client.get_collection(collection_name)
+            points_count = collection_info.points_count
+            qdrant_status = f"✅ Connected ({points_count} vectors)"
+        except:
+            qdrant_status = "✅ Connected (info unavailable)"
+    
     status_data = {
-        "Component": ["OpenAI API", "LangSmith Tracking", "ONNX Model", "Vectorstore", "Documents"],
+        "Component": [
+            "OpenAI API", 
+            "ONNX Model", 
+            "Vectorstore", 
+            "Qdrant Collection",
+            "RAG Chains",
+            "LangSmith Tracing"
+        ],
         "Status": [
             "✅ Connected" if st.session_state.openai_api_key else "❌ Not configured",
-            "✅ Enabled" if st.session_state.langsmith_client else "❌ Not configured",
             "✅ Ready" if os.path.exists(model_path) else "❌ Model not found",
+            "✅ Connected" if vectorstore else "❌ Not connected",
+            qdrant_status,
             "✅ Ready" if vectorstore else "❌ Not available",
-            f"✅ {len(rag_documents)} docs loaded" if rag_documents else "❌ No documents"
+            "✅ Enabled" if langsmith_enabled else "❌ Not configured"
         ]
     }
     st.table(pd.DataFrame(status_data))
     
-    if st.session_state.langsmith_client:
-        st.info(f"📊 LangSmith Project: **{st.session_state.langsmith_project}**")
-        st.markdown(f"[View in LangSmith](https://smith.langchain.com)")
+    st.info(f"🔗 Qdrant URL: {qdrant_url}")
+    st.info(f"📦 Collection: {collection_name}")
+    st.info(f"🧠 Embedding Model: {embedding_model} ({expected_dim}-dim)")
+    st.info(f"🔬 Session ID: {st.session_state.session_id}")
+    if langsmith_enabled:
+        st.info("🔗 LangSmith: https://smith.langchain.com")
+    st.info("🔒 Using HTTPS")
 
 # Footer
 st.markdown("---")
-st.markdown("*Powered by ONNX, LangChain, LangGraph, Qdrant, OpenAI, and LangSmith*")
+st.markdown("*Powered by ONNX, LangChain, Qdrant Cloud, OpenAI, and LangSmith*")
+st.caption("💡 This app connects to your existing Qdrant vectorstore without re-embedding documents.")
+if langsmith_enabled:
+    st.caption("📊 All queries are tracked in LangSmith for analysis and quality monitoring.")
